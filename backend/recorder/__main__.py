@@ -20,10 +20,11 @@ reconnect waits until maintenance ends; see exchange.py.
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import time
 
-from . import coinbase, exchange
+from . import autoupload, coinbase, exchange
 from .config import REPO_ROOT, from_env, load_env_file
 from .discovery import Universe
 from .settlements import SettlementTracker
@@ -238,7 +239,7 @@ async def _sleep(stop, seconds):
         pass
 
 
-async def main_async(cfg, use_webull, seconds):
+async def main_async(cfg, use_webull, seconds, env_file=None):
     """Runs until Ctrl-C / SIGTERM (or --seconds). Webull failures are handled in-process."""
     writer = RecordWriter(cfg.data_dir, level=cfg.zstd_level).start()
     writer.write("health", "recorder", "start", cfg.public_summary())
@@ -259,10 +260,18 @@ async def main_async(cfg, use_webull, seconds):
         asyncio.create_task(health_loop(cfg, writer, universe, webull, tracker, maint, stop)),
         asyncio.create_task(webull_supervisor(webull, maint, universe, writer, stop)),
     ]
+    uploader = None
+    if env_file is not None and autoupload.enabled():
+        uploader = autoupload.AutoUpload(cfg.data_dir, env_file, writer, log, cfg.upload_time)
+        tasks.append(asyncio.create_task(uploader.run(stop, _sleep)))
+        log.info("daily Kaggle upload at %s local time -> %s", cfg.upload_time,
+                 os.environ.get("KAGGLE_DATASET"))
     if seconds:
         loop.call_later(seconds, stop.set)
     await stop.wait()
     webull.stop()
+    if uploader is not None:
+        uploader.terminate()
     await asyncio.gather(*tasks, return_exceptions=True)
     writer.write("health", "recorder", "stop", {"pending_settlements": len(tracker.pending),
                                                 "webull_restarts": webull.restarts})
@@ -290,7 +299,7 @@ def main():
                 "use --no-webull to record Coinbase only")
     log.info("config %s -> %s", cfg.public_summary(), cfg.data_dir)
     started = time.time()
-    asyncio.run(main_async(cfg, use_webull, args.seconds))
+    asyncio.run(main_async(cfg, use_webull, args.seconds, args.env_file))
     log.info("ran %.0fs", time.time() - started)
 
 

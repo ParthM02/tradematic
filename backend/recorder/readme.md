@@ -56,19 +56,40 @@ Size: the 2026-11-17 overnight recording was 564 MB as gzip. As level-9 zstd it 
 
 ## Kaggle upload
 
-Set `KAGGLE_API_TOKEN` and `KAGGLE_DATASET=<username>/<slug>` in `.env`, then:
+Set `KAGGLE_API_TOKEN` and `KAGGLE_DATASET=<username>/<slug>` in `.env`. The recorder then
+uploads automatically once a day at `RECORDER_UPLOAD_TIME` (local time, default 03:30).
+It also uploads 15 minutes after start if the last success is more than 25 hours old.
+A failed upload is retried hourly up to 3 times. Each attempt is one log line; full
+output goes to `backend/data/recorder/logs/upload.log`.
+
+Kaggle allows at most 50 top-level files per dataset, so the dataset holds one folder per
+UTC day, each uploaded as one `.tar`. That fits up to 49 days of recording. Past that,
+the upload stops with a clear error instead of uploading part of the data.
+
+The upload cannot disturb recording. It runs as a separate child process at the lowest
+CPU priority, with idle-only disk access on Linux (`ionice -c3`), in its own session, so
+Ctrl-C does not interrupt it mid-way. Stopping the recorder stops it cleanly, and the
+next run sends everything again. Files are hard-linked into a staging folder (no copies).
+The Kaggle CLI builds each day's tar (about 1-1.5 GB) in a temp folder; on the Pi that is
+the RAM disk `/dev/shm`, so archives never touch the SD card
+(`RECORDER_UPLOAD_TMPDIR` overrides it).
+`RECORDER_UPLOAD=off` turns it off.
+
+To upload by hand (for example from a second tmux window):
 
 ```sh
-uv run --group recorder python -m backend.recorder.upload --dry-run   # what would be sent
-uv run --group recorder python -m backend.recorder.upload
+uv run --frozen --only-group recorder python -m backend.recorder.upload --dry-run
+uv run --frozen --only-group recorder python -m backend.recorder.upload
 ```
 
 Only finished hour files of the five streams are uploaded: never the current hour, the
-Webull token folder, Parquet tables or `.env`. Each day becomes one uncompressed tar
-(the files are already compressed). The first run creates the dataset **private**. Later
-runs publish a new version and delete older versions, so Kaggle storage stays equal to
-the size of the data. The data is Webull/Kalshi market data; check their terms before
-making the dataset public.
+Webull token folder, Parquet tables, logs or `.env`. The first run creates the dataset
+**private**. Later runs publish a new version and delete older versions, so Kaggle storage
+stays equal to the size of the data. To fetch a month for research:
+`kaggle datasets download parthmehta10/tradematic-crypto-ticks --unzip`, then
+extract the day `.tar` files into `<stream>/<day>/` folders if Kaggle has not already. Upload from one machine only: each upload replaces
+the dataset's contents with that machine's files. The data is Webull/Kalshi market data;
+check their terms before making the dataset public.
 
 ## Optional: compaction
 
@@ -101,16 +122,16 @@ systemctl list-timers tradematic-upload.timer         # next upload
 
 The log gets one status line every 15 minutes (`RECORDER_LOG_SECONDS`), for example
 `last 15 min: webull 154,210 msgs, coinbase 31,882 msgs | webull connected 26/26 subscribed | ...`.
-Health records are still saved every 30 s. Run the upload from one machine only:
-each upload replaces the dataset's contents with that machine's files.
+Health records are still saved every 30 s.
 
 The recorder never exits on its own. If Webull's connection dies, or sends nothing for
 `RECORDER_STALL_SECONDS` (default 600) while contracts are subscribed, it reconnects only
 Webull: after 60 s, doubling up to 15 minutes while reconnects keep failing without data
 (e.g. bad credentials). Coinbase, discovery and settlements keep recording throughout.
 Each attempt is logged once and saved as `webull_waiting` / `webull_restart` events in
-`health`. `tradematic-recorder` (optional) restarts the process only if it crashes.
-`tradematic-upload.timer` uploads daily at 03:30 Pi time and catches up after downtime.
+`health`. The systemd units are optional: `tradematic-recorder` restarts the process only
+if it crashes. If you install `tradematic-upload.timer`, set `RECORDER_UPLOAD=off` so
+uploads do not happen twice.
 
 To run it in tmux instead of systemd:
 

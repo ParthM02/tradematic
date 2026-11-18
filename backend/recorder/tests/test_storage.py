@@ -153,32 +153,50 @@ def test_stall_detection():
 
 
 # ------------------------------------------------------------------ upload staging ----
-def test_upload_stages_only_finished_recordings(tmp_path):
-    old = time.time() - 3 * 3600
-    keep = []
-    for stream in ("webull", "coinbase", "settlements"):
-        p = hour_path(tmp_path, stream, NOW_NS)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(zstandard.compress(b"{}\n"))
-        os.utime(p, (old, old))
-        keep.append(p)
-    current = hour_path(tmp_path, "webull", NOW_NS + 3600 * 10**9)
-    current.write_bytes(b"")  # being written right now
-    for secret in (tmp_path / ".webull_token" / "token.txt", tmp_path / "parquet" / "wb_tick.parquet"):
+def _hour_file(root, stream, recv_ns, age_s=3 * 3600, body=b"{}\n"):
+    p = hour_path(root, stream, recv_ns)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(zstandard.compress(body))
+    old = time.time() - age_s
+    os.utime(p, (old, old))
+    return p
+
+
+def test_upload_stages_only_finished_recordings_in_day_folders(tmp_path):
+    keep = [_hour_file(tmp_path, s, NOW_NS) for s in ("webull", "coinbase", "settlements")]
+    keep.append(_hour_file(tmp_path, "webull", NOW_NS + 86400 * 10**9))  # next day
+    _hour_file(tmp_path, "webull", NOW_NS + 2 * 86400 * 10**9, age_s=0)  # being written now
+    for secret in (tmp_path / ".webull_token" / "token.txt", tmp_path / "parquet" / "wb_tick.parquet",
+                   tmp_path / "logs" / "upload.log"):
         secret.parent.mkdir(parents=True)
         secret.write_text("x")
-        os.utime(secret, (old, old))
     files = upload.finished_files(tmp_path, 70)
     assert sorted(files) == sorted(keep)
-    root, total, n = upload.stage(tmp_path, files, "me/ticks", "Tradematic ticks")
-    assert n == 3 and total == sum(p.stat().st_size for p in keep)
+    root = upload.stage(tmp_path, files, "me/ticks", "Tradematic ticks")
     staged = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
-    assert staged == sorted(["dataset-metadata.json"] + [f"20270115/{p.name}" for p in keep])
-    assert all((root / "20270115" / p.name).stat().st_ino == p.stat().st_ino for p in keep)  # links
+    assert staged == sorted(["dataset-metadata.json"] + [f"{p.parent.name}/{p.name}" for p in keep])
+    assert sorted(x.name for x in root.iterdir()) == ["20270115", "20270116", "dataset-metadata.json"]
+    assert all((root / p.parent.name / p.name).stat().st_ino == p.stat().st_ino for p in keep)  # links
     meta = json.loads((root / "dataset-metadata.json").read_text())
     assert meta == {"title": "Tradematic ticks", "id": "me/ticks", "licenses": [{"name": "other"}]}
-    upload.stage(tmp_path, files, "me/ticks", "Tradematic ticks")  # re-staging is idempotent
+    upload.stage(tmp_path, files, "me/ticks", "Tradematic ticks")  # idempotent
     assert all(p.exists() for p in keep)  # sources untouched
+
+
+def test_top_level_limit_is_enforced(tmp_path):
+    files = [_hour_file(tmp_path, "health", NOW_NS + d * 86400 * 10**9) for d in range(50)]
+    with pytest.raises(RuntimeError, match="50 top-level"):
+        upload.stage(tmp_path, files, "me/x", "Title x")
+    root = upload.stage(tmp_path, files[:49], "me/x", "Title x")  # 49 days + metadata is the max
+    assert len(list(root.iterdir())) == 50
+
+
+def test_archives_go_to_ram_disk_when_it_fits(tmp_path, monkeypatch):
+    monkeypatch.setenv("RECORDER_UPLOAD_TMPDIR", str(tmp_path))
+    d, where = upload.scratch_dir(1000)
+    assert d == tmp_path / "tradematic-upload" and d.is_dir() and where == str(tmp_path)
+    d, where = upload.scratch_dir(10**18)  # does not fit anywhere -> system temp, said so
+    assert "not enough" in where
 
 
 def test_status_line_summarizes_interval():

@@ -36,6 +36,14 @@ def _csv(name, default):
     return tuple(s.strip() for s in raw.split(",") if s.strip()) if raw else tuple(default)
 
 
+def _hhmm(raw):
+    raw = raw.strip()
+    h, _, m = raw.partition(":")
+    if not (h.isdigit() and m.isdigit() and int(h) < 24 and int(m) < 60):
+        raise ValueError("RECORDER_UPLOAD_TIME must be HH:MM (24-hour, local time)")
+    return f"{int(h):02d}:{int(m):02d}"
+
+
 def _int(name, default):
     raw = os.environ.get(name, "").strip()
     return int(raw) if raw else default
@@ -54,6 +62,7 @@ class Config:
     zstd_level: int = 9
     stall_seconds: int = 600
     maintenance_buffer_minutes: int = 15
+    upload_time: str = "03:30"
     webull_env: str = "prod"
     webull_region: str = "us"
     webull_transport: str = "tcp"
@@ -95,6 +104,7 @@ class Config:
             "zstd_level": self.zstd_level,
             "stall_seconds": self.stall_seconds,
             "maintenance_buffer_minutes": self.maintenance_buffer_minutes,
+            "upload_time": self.upload_time,
         }
 
 
@@ -118,6 +128,7 @@ def from_env():
         zstd_level=_int("RECORDER_ZSTD_LEVEL", 9),
         stall_seconds=_int("RECORDER_STALL_SECONDS", 600),
         maintenance_buffer_minutes=_int("RECORDER_MAINTENANCE_BUFFER_MINUTES", 15),
+        upload_time=_hhmm(os.environ.get("RECORDER_UPLOAD_TIME", "03:30")),
         webull_env=env,
         webull_region=os.environ.get("WEBULL_REGION", "us").strip(),
         webull_transport=transport,
