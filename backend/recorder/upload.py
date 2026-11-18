@@ -10,9 +10,11 @@ Settings (environment or .env):
   RECORDER_UPLOAD_TMPDIR  optional scratch folder for archives (default: RAM disk /dev/shm)
 
 Layout. Kaggle allows at most 50 top-level files per dataset, so the dataset holds one
-folder per UTC day (up to 49 days), each uploaded by the Kaggle CLI as one uncompressed
-.tar (the hour files inside are already zstd). More than 49 days is refused with a clear
-error rather than uploaded partially.
+folder per UTC day (up to 48 days) plus an `_about/` folder with a format README, each
+uploaded by the Kaggle CLI as one uncompressed .tar (the hour files inside are already
+zstd). The `_about/` folder is required: Kaggle unpacks a dataset that contains exactly one
+folder into top-level files (verified 2026-11-18), so there must always be two. More than
+48 days is refused with a clear error rather than uploaded partially.
 
 What is uploaded: only finished hour files of the recorder streams (webull, coinbase,
 markets, settlements, health), one file per hour (compact > zstd > gzip). Never the current
@@ -44,6 +46,21 @@ from .records import hour_files
 STREAMS = ("webull", "coinbase", "markets", "settlements", "health")
 STAGE = ".kaggle_stage"
 MAX_TOP_LEVEL = 50  # Kaggle limit on top-level files per dataset
+MAX_DAYS = MAX_TOP_LEVEL - 2  # minus the _about folder and dataset-metadata.json
+ABOUT = """# Tradematic crypto ticks
+
+One folder per UTC day (YYYYMMDD). Each holds one zstd-compressed JSONL file per stream
+per UTC hour: <stream>_<YYYYMMDDTHH>.jsonl.zst (or .compact.jsonl.zst / older .jsonl.gz).
+Streams: webull (event-quote, event-snapshot, event-tick, notice), coinbase (ticker,
+match, heartbeat), markets (Kalshi contract metadata), settlements (official results),
+health (recorder state; `maintenance` events mark Kalshi maintenance windows).
+
+Each line: {"recv_ns": local receive time ns, "src": source, "type": message type, "data": payload}.
+Read with backend.recorder.records.iter_records(path) from the tradematic repo.
+
+This folder also keeps Kaggle from flattening the upload: a dataset containing exactly one
+folder is unpacked to top-level files, so there are always at least two folders.
+"""
 
 
 def finished_files(data_dir, min_age_minutes=70):
@@ -63,10 +80,13 @@ def stage(data_dir, files, dataset, title):
     if root.exists():
         shutil.rmtree(root)  # only links and a metadata file live here
     days = sorted({p.parent.name for p in files})
-    if len(days) + 1 > MAX_TOP_LEVEL:
-        raise RuntimeError(f"{len(days)} days is more than Kaggle's {MAX_TOP_LEVEL} top-level entries "
-                           f"(49 day folders + metadata); split the data into a second dataset")
+    if len(days) > MAX_DAYS:
+        raise RuntimeError(f"{len(days)} days exceeds Kaggle's {MAX_TOP_LEVEL} top-level entries "
+                           f"({MAX_DAYS} day folders + _about + metadata); split the data into a second dataset")
     root.mkdir(parents=True)
+    # Always a second folder: Kaggle flattens a dataset that contains exactly one folder.
+    (root / "_about").mkdir()
+    (root / "_about" / "README.md").write_text(ABOUT)
     for p in files:
         day = root / p.parent.name
         day.mkdir(exist_ok=True)
@@ -136,8 +156,8 @@ def main():
     total = sum(p.stat().st_size for p in files)
     print(f"{len(files)} hour files in {len(days)} day folders ({days[0]}..{days[-1]}), "
           f"{total/2**30:.2f} GB from {data} -> {dataset}")
-    if len(days) + 1 > MAX_TOP_LEVEL:
-        raise SystemExit(f"too many days for one dataset ({len(days)} > {MAX_TOP_LEVEL - 1})")
+    if len(days) > MAX_DAYS:
+        raise SystemExit(f"too many days for one dataset ({len(days)} > {MAX_DAYS})")
     if a.dry_run:
         return
     root = stage(data, files, dataset, title)

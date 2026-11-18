@@ -63,8 +63,10 @@ A failed upload is retried hourly up to 3 times. Each attempt is one log line; f
 output goes to `backend/data/recorder/logs/upload.log`.
 
 Kaggle allows at most 50 top-level files per dataset, so the dataset holds one folder per
-UTC day, each uploaded as one `.tar`. That fits up to 49 days of recording. Past that,
-the upload stops with a clear error instead of uploading part of the data.
+UTC day plus an `_about/` folder (format README), each uploaded as one `.tar`. That fits up
+to 48 days of recording; past that, the upload stops with a clear error. `_about/` is
+needed because Kaggle unpacks an upload containing exactly one folder into loose top-level
+files.
 
 The upload cannot disturb recording. It runs as a separate child process at the lowest
 CPU priority, with idle-only disk access on Linux (`ionice -c3`), in its own session, so

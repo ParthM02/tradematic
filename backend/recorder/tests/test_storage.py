@@ -174,8 +174,9 @@ def test_upload_stages_only_finished_recordings_in_day_folders(tmp_path):
     assert sorted(files) == sorted(keep)
     root = upload.stage(tmp_path, files, "me/ticks", "Tradematic ticks")
     staged = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
-    assert staged == sorted(["dataset-metadata.json"] + [f"{p.parent.name}/{p.name}" for p in keep])
-    assert sorted(x.name for x in root.iterdir()) == ["20270115", "20270116", "dataset-metadata.json"]
+    assert staged == sorted(["dataset-metadata.json", "_about/README.md"]
+                            + [f"{p.parent.name}/{p.name}" for p in keep])
+    assert sorted(x.name for x in root.iterdir()) == ["20270115", "20270116", "_about", "dataset-metadata.json"]
     assert all((root / p.parent.name / p.name).stat().st_ino == p.stat().st_ino for p in keep)  # links
     meta = json.loads((root / "dataset-metadata.json").read_text())
     assert meta == {"title": "Tradematic ticks", "id": "me/ticks", "licenses": [{"name": "other"}]}
@@ -184,11 +185,18 @@ def test_upload_stages_only_finished_recordings_in_day_folders(tmp_path):
 
 
 def test_top_level_limit_is_enforced(tmp_path):
-    files = [_hour_file(tmp_path, "health", NOW_NS + d * 86400 * 10**9) for d in range(50)]
+    files = [_hour_file(tmp_path, "health", NOW_NS + d * 86400 * 10**9) for d in range(49)]
     with pytest.raises(RuntimeError, match="50 top-level"):
         upload.stage(tmp_path, files, "me/x", "Title x")
-    root = upload.stage(tmp_path, files[:49], "me/x", "Title x")  # 49 days + metadata is the max
+    root = upload.stage(tmp_path, files[:48], "me/x", "Title x")  # 48 days + _about + metadata
     assert len(list(root.iterdir())) == 50
+
+
+def test_a_single_day_still_stages_two_folders(tmp_path):
+    """Kaggle flattens an upload with exactly one folder; _about prevents that."""
+    root = upload.stage(tmp_path, [_hour_file(tmp_path, "webull", NOW_NS)], "me/x", "Title x")
+    folders = sorted(x.name for x in root.iterdir() if x.is_dir())
+    assert folders == ["20270115", "_about"]
 
 
 def test_archives_go_to_ram_disk_when_it_fits(tmp_path, monkeypatch):
