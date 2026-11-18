@@ -4,3 +4,6 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 backend/research/artifacts/
+.env
+*.webull_token*
+webull_*sdk.log

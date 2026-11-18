@@ -127,8 +127,20 @@ def align_signals(decisions, quotes, markets, delay_minutes=0):
 
 
 def price_overlay(
-    aligned, *, quantity=1, rate=0.07, rounding=0.01, slippage=0.0, positive_edge_only=False
+    aligned,
+    *,
+    quantity=1,
+    flat_fee_per_contract=0.02,
+    rate=0.07,
+    rounding=0.01,
+    slippage=0.0,
+    positive_edge_only=False,
 ):
+    if quantity < 1 or (
+        flat_fee_per_contract is not None
+        and (not np.isfinite(flat_fee_per_contract) or flat_fee_per_contract < 0)
+    ):
+        raise ValueError("Invalid quantity or flat entry fee")
     d = aligned.copy()
     # Ask=1 is a non-executable/no-offer sentinel; no depth is assumed there.
     available = (
@@ -140,7 +152,10 @@ def price_overlay(
         & d.entry_time.lt(d.close_time)
     )
     d["entry_price"] = (d.ask + slippage).clip(upper=1)
-    d["entry_fee"] = taker_fee(d.entry_price, quantity, rate, rounding)
+    if flat_fee_per_contract is None:
+        d["entry_fee"] = taker_fee(d.entry_price, quantity, rate, rounding)
+    else:
+        d["entry_fee"] = np.where(d.entry_price.notna(), quantity * flat_fee_per_contract, np.nan)
     d["proxy_expected_net"] = quantity * (d.side_probability_proxy - d.entry_price) - d.entry_fee
     d["assumed_trade"] = available & (d.proxy_expected_net.gt(0) if positive_edge_only else True)
     d["scored_trade"] = d.assumed_trade & d.kalshi_y.notna()
@@ -245,13 +260,26 @@ def main(argv=None):
     p.add_argument("--candles", type=Path, default=Path("backend/data/kalshi/candles_SOLUSD.csv"))
     p.add_argument("--markets", type=Path, default=Path("backend/data/kalshi/markets_SOLUSD.csv"))
     p.add_argument(
-        "--output", type=Path, default=Path("backend/research/artifacts/kalshi_sol_overlay_v1")
+        "--output", type=Path, default=Path("backend/research/artifacts/kalshi_sol_overlay_flat_2c")
     )
     p.add_argument("--quantity", type=int, default=1)
+    p.add_argument("--fee-mode", choices=("flat", "probability"), default="flat")
+    p.add_argument(
+        "--flat-fee-per-contract",
+        type=float,
+        default=0.02,
+        help="Purchase fee in dollars per contract; resolution fee is zero",
+    )
     p.add_argument("--fee-rate", type=float, default=0.07)
     p.add_argument("--fee-rounding", type=float, default=0.01)
     args = p.parse_args(argv)
-    if args.quantity < 1 or args.fee_rate < 0 or args.fee_rounding <= 0:
+    if (
+        args.quantity < 1
+        or args.fee_rate < 0
+        or args.fee_rounding <= 0
+        or not np.isfinite(args.flat_fee_per_contract)
+        or args.flat_fee_per_contract < 0
+    ):
         p.error("Invalid quantity or fee assumptions")
     if args.output.exists() and any(args.output.iterdir()):
         raise ValueError("Output is nonempty; select a new experiment directory")
@@ -267,6 +295,9 @@ def main(argv=None):
                 result = price_overlay(
                     aligned,
                     quantity=args.quantity,
+                    flat_fee_per_contract=args.flat_fee_per_contract
+                    if args.fee_mode == "flat"
+                    else None,
                     rate=args.fee_rate,
                     rounding=args.fee_rounding,
                     slippage=slip,
@@ -321,6 +352,9 @@ def main(argv=None):
     manifest = {
         "audit": audit,
         "quantity": args.quantity,
+        "fee_mode": args.fee_mode,
+        "flat_fee_per_contract": args.flat_fee_per_contract if args.fee_mode == "flat" else None,
+        "resolution_fee": 0.0,
         "fee_rate": args.fee_rate,
         "fee_rounding": args.fee_rounding,
         "sources": SOURCES,
@@ -343,6 +377,18 @@ def main(argv=None):
         "net_pnl",
         "net_per_trade",
     ]
+    if args.fee_mode == "flat":
+        fee_description = (
+            f"User-specified flat purchase fee: ${args.flat_fee_per_contract:.4f} per contract, "
+            "charged once on entry, independently of price and outcome. No resolution fee. "
+            "This assumption supersedes the earlier probability-based fee scenarios."
+        )
+    else:
+        fee_description = (
+            f"Fee scenario: ceil({args.fee_rate} × contracts × ask × (1−ask) / {args.fee_rounding}) "
+            f"× {args.fee_rounding} dollars per order. No resolution fee. "
+            "This legacy scenario does not establish historical/account fees."
+        )
     report = [
         "# SOL signals over Kalshi quotes",
         "",
@@ -377,12 +423,7 @@ def main(argv=None):
         (
             f"Assume {args.quantity} contract(s) at the YES ask for a green prediction, or NO ask for red, "
             "held to the recorded Kalshi result. Gross P&L = contracts × (settlement payout − entry ask). "
-            f"Fee scenario: ceil({args.fee_rate} × contracts × ask × (1−ask) / {args.fee_rounding}) "
-            f"× {args.fee_rounding} dollars per order. Defaults are conservative whole-cent rounding. "
-            "These are explicit fee assumptions; the CSVs do not contain historical fees or fee multipliers. "
-            "The current official fee PDF uses a 0.07 coefficient and different rounding language; "
-            "its July effective date does not verify the full earlier backtest schedule. Gross P&L "
-            "and configurable fee parameters are provided separately."
+            + fee_description
         ),
         "",
         (

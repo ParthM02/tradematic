@@ -1,0 +1,12 @@
+# Daily Kaggle upload at 03:30 Pi local time (a quiet hour). Persistent=true runs a
+# missed upload after the Pi was off.
+[Unit]
+Description=Daily Tradematic Kaggle upload
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

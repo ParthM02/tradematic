@@ -1,0 +1,13 @@
+# systemd unit: one Kaggle upload of finished recordings. Started by tradematic-upload.timer.
+[Unit]
+Description=Upload Tradematic recordings to Kaggle
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+WorkingDirectory=/home/pi/tradematic
+ExecStart=/home/pi/.local/bin/uv run --frozen --only-group recorder python -m backend.recorder.upload
+Nice=10
+IOSchedulingClass=idle

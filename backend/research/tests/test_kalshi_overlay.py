@@ -48,7 +48,7 @@ def test_exact_quotes_no_future_fill_and_actual_kalshi_settlement():
     assert result.scored_trade.tolist() == [True, True, False]
     assert result.side.tolist() == ["yes", "no", "yes"]
     assert result.kalshi_win.iloc[0] == 0  # Coinbase called this a correct green.
-    np.testing.assert_allclose(result.net_pnl, [-0.86, 0.78, 0.0])
+    np.testing.assert_allclose(result.net_pnl, [-0.87, 0.78, 0.0])
     assert result.skip_reason.iloc[2] == "no_exact_quote"
     # Future quotes and settlement may change scores, but cannot change entry actions.
     q.loc[q.quote_time.dt.minute.eq(6), "yes_ask"] = 0.99
@@ -77,3 +77,17 @@ def test_whole_cent_fees_and_unavailable_ask():
     result = price_overlay(align_signals(d, q, m))
     assert not result.assumed_trade.iloc[0]
     assert result.skip_reason.iloc[0] == "unavailable_ask_or_closed"
+
+
+def test_flat_fee_is_per_contract_once_independent_of_price_and_outcome():
+    d, q, m = fixture()
+    result = price_overlay(align_signals(d, q, m), quantity=3)
+    np.testing.assert_allclose(result.entry_fee.iloc[:2], [0.06, 0.06])
+    np.testing.assert_allclose(result.net_pnl, [-2.61, 2.34, 0.0])
+    assert result.cash_outlay.iloc[0] == 3 * 0.85 + 0.06
+    d.loc[0, "p"] = 0.865
+    aligned = align_signals(d, q, m)
+    assert not price_overlay(aligned, positive_edge_only=True).assumed_trade.iloc[0]
+    assert price_overlay(
+        aligned, flat_fee_per_contract=None, positive_edge_only=True
+    ).assumed_trade.iloc[0]

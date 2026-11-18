@@ -250,23 +250,28 @@ uv run python -m backend.research.kalshi_overlay \
   --research backend/research/artifacts/walk_forward_v1_audited \
   --candles backend/data/kalshi/candles_SOLUSD.csv \
   --markets backend/data/kalshi/markets_SOLUSD.csv \
-  --output backend/research/artifacts/kalshi_sol_overlay_v1
+  --fee-mode flat --flat-fee-per-contract 0.02 \
+  --output backend/research/artifacts/kalshi_sol_overlay_flat_2c
 ```
 
 `markets_SOLUSD.csv` supplies actual settlement outcomes and UTC market opens;
 Coinbase candle labels are not substituted for Kalshi results. Green signals
 buy YES at `yes_ask`; red signals buy NO at `no_ask`. Positions are held to
-settlement. The default is one contract with a 0.07 taker-fee coefficient and
-conservative whole-cent rounding per order. `--quantity`, `--fee-rate`, and
-`--fee-rounding` make these assumptions explicit; the CSV does not establish
-the historical fee schedule or account-specific charges.
+settlement. Per the user's assumption, the default is one contract with a
+**flat $0.02 purchase fee per contract and no resolution fee**. Fees apply once
+to each assumed purchase, whether the contract eventually wins or loses, and
+also apply when evaluating the positive-proxy-EV entry filter. `--quantity`
+scales both contracts and purchase fees. This supersedes earlier fee scenarios.
 
-To expose fee-rounding sensitivity, repeat the command with
-`--fee-rounding 0.0001` and a fresh output directory, such as
-`backend/research/artifacts/kalshi_sol_overlay_fine_fees`. This compares the
-same frozen actions and quotes under finer fee rounding; it does not establish
-which historical/account fee schedule applied. Read the gross result and both
-fee scenarios together.
+For reproducibility of those earlier scenarios, `--fee-mode probability`
+enables the old `--fee-rate` and `--fee-rounding` parameters. They are inactive
+in flat-fee mode. Use a new output directory for every run.
+
+Kalshi's 15-minute settlement compares the CF Benchmarks average in the minute
+before close with the average in the minute before open. Our Coinbase label
+compares the first minute's opening trade with the final minute's closing
+trade. Both the averaging method and the underlying price feed differ. The
+minute OHLCV files cannot isolate how much each causes an observed disagreement.
 
 The overlay compares ML and distance fixed-selected/dynamic policies. It
 reports all signals and a separately labeled positive-proxy-EV filter, with
@@ -283,3 +288,174 @@ latency, and confirmed fills. Reports preserve gross/net P&L, fee assumptions,
 settlement-label differences, execution coverage, missing quotes, and skip
 reasons. `summary.csv` includes per-fold results and seven-day bootstrap
 intervals; `aligned_decisions.parquet` is the full audit trail.
+
+## SOL specialists for uncertain Kalshi markets
+
+```sh
+DYLD_FALLBACK_LIBRARY_PATH=/opt/anaconda3/lib uv run python -m backend.research.run_uncertainty \
+  --output backend/research/artifacts/uncertainty_sol_v2
+```
+
+This experiment predicts **actual Kalshi YES/NO settlement** on listed SOL
+contracts. It uses no authenticated benchmark data. The current contract's
+known `floor_strike` is a feature; `expiration_value` and `result` never enter
+feature construction. Valid Kalshi targets remain in the universe even when
+the corresponding Coinbase candle is a doji or has later missing prices.
+
+The primary uncertain-state definition is a YES bid/ask midpoint between
+20 and 80 cents and a spread no wider than 10 cents. Secondary 30–70 and
+40–60 bands are reported without selecting a winner from their test results.
+All decisions use completed-minute k=1..10. Models pool the ten horizons with
+k and remaining time as features. Inverse within-window weights give each
+training/calibration window equal total weight despite differing counts of
+observable uncertain states.
+
+The predeclared comparisons are:
+
+| Candidate | Information / architecture |
+| --- | --- |
+| `market_raw` | Current quote midpoint, no fitting |
+| `market_platt` | Regularized logistic model of market log odds, spread, k, and log-odds × k |
+| `market_tree` | Small LightGBM model of Kalshi quote history, spread, volume, and k |
+| `path_tree` | Market information plus original causal path/cross-asset features and actual-strike distances |
+| `classic_tree` | Adds volatility-normalized SMA/EMA gaps and slopes, MACD/signal/histogram, and Bollinger position/width |
+| `technical_tree` | Adds the forward-only Kalman local-linear filter to the same feature set |
+| `technical_linear` | Regularized logistic regression with the complete feature set |
+| `technical_extra_trees` | Shallow randomized-tree forest with the complete feature set |
+| `technical_residual` | LightGBM correction to market log odds, explicitly restoring the market offset at inference |
+| `technical_all_states` | Same features/LightGBM as `technical_tree`, trained across all market probabilities with the same spread cap |
+
+Specialists train only on uncertain states. The all-state control is calibrated
+on the same uncertain-state calibration partition as the specialists. All
+calibrators are Platt mappings fit after the classifier, on a disjoint time
+period. Linear-model imputation and scaling fit training rows only. Parameters
+and indicator spans are fixed before scoring; no indicator or architecture is
+tuned on test outcomes. SMA/EMA spans are 5/15/30/60 minutes; MACD uses 12/26/9;
+Bollinger geometry uses 20 minutes. The Kalman filter uses a two-state level
+and velocity model, lagged 60-minute return variance as observation variance,
+and fixed process-noise ratios of 0.01 for level and 0.001 for velocity. It
+resets at gaps and never smooths backward from future observations.
+
+Three purged expanding folds retain the original 28-day test lengths, separate
+14-day calibration and tuning periods, and 120-minute embargoes. The best
+market-only baseline, augmented model, and overall champion are selected on
+**tuning Brier score** for each fold before test replay. An augmented model is
+allowed to lose to the baseline. The model comparison uses window-weighted
+Brier/log loss, calibration diagnostics, and paired seven-day block-bootstrap
+differences. Forecast accuracy alone is not the selection objective.
+
+Execution uses the existing flat **two-cent purchase fee**, no resolution fee,
+and one contract held to actual settlement. For probability p, YES value is
+`p - yes_ask - 0.02`; NO value is `1 - p - no_ask - 0.02`. Either side can be
+chosen, including a side with less than 50% model probability if its price is
+low enough. A fixed small margin grid is tuned using realized net P&L per
+listed validation window. Dynamic policies lock at first passage; fixed
+policies choose k and margin on tuning only. Policies may abstain entirely.
+If a winning cutoff has no validation trades, it becomes explicit abstention
+rather than an unsupported finite threshold that could start trading later.
+
+The original **25% coverage constraint uses all listed test contracts**, not
+only uncertain snapshots or executed trades. Both selective-profit policies
+and coverage-constrained policies are reported. If no positive-value cutoff
+reaches 25% validation coverage, the constrained result is explicitly marked
+infeasible and shows the maximum available coverage. Test eligibility must
+also be checked separately in each fold. No adverse-value actions are forced
+to manufacture coverage. Execution stress charges one/two extra cents to the
+same frozen actions without selecting a different set of trades.
+
+The run saves `report.md`, `forecast_metrics.csv`, `reliability.csv`,
+`brier_differences.csv`, `policy_metrics.csv`, `fixed_frontier.csv`, and
+`execution_stress.csv`, plus models, raw predictions/actions, feature groups,
+input/source hashes, and the selection record. These artifacts are ignored by
+git. The tests include future-data perturbation, exclusion of settlement
+columns, missing quote clocks, forward-filter prefix replay, restoration of
+the market residual offset, fee accounting, and coverage infeasibility.
+
+This follow-up reuses calendar periods already examined in the earlier
+research. Its fold computations remain chronological, but its findings are
+**exploratory**, with unadjusted multiple-comparison intervals. A new untouched
+period is required for confirmation. The minute files do not prove fills,
+quote publication latency, resting depth, or original unrevised benchmark
+values. Extra indicators transform existing observations; their usefulness
+must be established by the controlled comparisons above.
+
+## Frozen-model calibration experiment and new test data
+
+```sh
+DYLD_FALLBACK_LIBRARY_PATH=/opt/anaconda3/lib uv run python -m backend.research.calibration_study
+uv run python -m backend.research.public_data backfill
+DYLD_FALLBACK_LIBRARY_PATH=/opt/anaconda3/lib uv run python -m backend.research.calibration_study \
+  --fresh-dir backend/data/fresh_20260815_20260912
+uv run python -m backend.research.public_data record --seconds 60
+```
+
+The first command **freezes** the original chosen classifiers, feature sets,
+imputers, scalers and architecture choices from `uncertainty_sol_v2`. It fits
+only new post-hoc calibrators on each original calibration partition and tunes
+the unchanged stopping policies on the separate original tuning partition.
+The original model files are hash-checked and never overwritten or refitted.
+
+| Calibration arm | Controlled change |
+| --- | --- |
+| `legacy_weighted` | Original saved pooled Platt mapping |
+| `pooled_unweighted` | Same Platt family, one unit of calibration weight per observed state |
+| `per_minute` | Separate unweighted Platt mappings at k=1..10; pooled fallback for fewer than 100 samples or a one-class bin |
+| `context` | Regularized logistic calibration of existing raw model score, market log odds, time, spread and fixed interactions |
+
+The context arm adds no new price information or technical features. It
+conditions the mapping on variables that affect trade selection: current
+model/market disagreement, market-price level and trigger time. Every
+calibrator is fit before its fold's tuning and test dates. Calibration-arm
+selection minimizes **unweighted tuning Brier**, matching the prospective
+state sample, rather than choosing the most profitable test result. The
+original window-weighted forecast score remains a secondary diagnostic.
+
+The original inverse within-window calibration weights depend on how many
+eligible states the completed historical window contained. This changes the
+sampling target and can distort prospective probabilities. Unweighted and
+per-minute mappings test that concern without changing classifier training.
+The source classifiers retain their original training weights, so this
+experiment isolates post-hoc probability correction.
+
+`fixed_actions_calibration.csv` compares all mappings on exactly the same
+original windows, sides, entry prices and trigger times. It measures
+probability correction independently of changed trade selection. The usual
+replayed policies are also evaluated, with selection-dependent reliability by
+minute, market-price band and model/market disagreement. These diagnostic bins
+are not automatically converted into additional trading rules.
+
+`protocol.json`, `selection.json` and `frozen_final.joblib` are written before
+scoring the new interval. The predeclared new test is **August 15–September 12,
+2026 UTC**, after the locally available SOL/Kalshi research history. Its final
+pipeline uses only the original last fold's classifier, calibration data and
+tuning dates. It performs no fit or policy selection on the new interval.
+Old-period results remain explicitly exploratory. Every calibration arm is
+reported on the new data; `selected` always refers to the arm chosen on the
+old tuning period, never a new-period winner.
+
+The backfill uses public Kalshi market/candlestick endpoints, including the
+archive, plus public Coinbase one-minute candles. Original files remain
+unchanged. Additional Coinbase history is appended into separate full-history
+files to preserve exactly the same EMA/Kalman state. Raw successful responses
+are cached with request URLs, receive times and atomic writes. Resume checks
+that cached requests match their parameters. Public batch requests budget the
+full rectangular ticker-count × requested-minute-span under the API limit.
+Archived decimal-dollar strings and legacy integer-cent prices are parsed
+separately. Null quotes remain absent; no future or synthetic quote is used to
+fill a missing observation. Dataset manifests retain hashes and missing-data
+counts, and evaluation reports actual listed/observable market coverage.
+
+Outputs are under `backend/research/artifacts/calibration_sol_v1/`; the new
+evaluation goes into its `fresh/` subdirectory. An already scored new period
+cannot be overwritten. Forecast metrics, fee-aware decisions, predicted versus
+realized selected-trade edge, conditional reliability, execution stress and
+source/frozen-model manifests are saved. The two-cent purchase fee and zero
+resolution fee remain fixed, with 25% coverage checked separately from returns.
+
+The bounded live recorder captures public BTC/ETH/SOL Coinbase best-book
+snapshots and the active SOL Kalshi book (up to ten levels). It stores request
+send and response receive timestamps, raw payloads and round-trip times. This
+is a data-quality smoke capture, not a complete event stream or a historical
+fill simulator. It places no orders, requires no credentials, and exits after
+the requested duration or the contract's close. Persistent collection is a
+separate operational task; this command does not install a daemon or schedule.

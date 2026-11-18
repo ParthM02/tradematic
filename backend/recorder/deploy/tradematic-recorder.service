@@ -1,0 +1,22 @@
+# systemd unit: run the recorder continuously and restart it if it exits.
+# Install (edit User/paths first):  see backend/recorder/readme.md, "Raspberry Pi".
+[Unit]
+Description=Tradematic tick recorder (Webull + Coinbase)
+Wants=network-online.target
+After=network-online.target time-sync.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/tradematic
+ExecStart=/home/pi/.local/bin/uv run --frozen --only-group recorder python -m backend.recorder
+# The recorder reconnects Webull by itself; this only covers crashes of the process itself.
+Restart=always
+RestartSec=60
+# SIGINT gives the recorder time to close its files cleanly.
+KillSignal=SIGINT
+TimeoutStopSec=30
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target
